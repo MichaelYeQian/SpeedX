@@ -6,64 +6,70 @@
 #define CSN_PIN 5
 
 RF24 radio(CE_PIN, CSN_PIN);
+const byte rxAddr[6] = "CTRL1"; // 接收遥控器的数据
+const byte txAddr[6] = "BASE1"; // 回复确认信号
 
-const byte rxAddr[6] = "NODE1";
-const byte txAddr[6] = "NODE2";
-
-unsigned long lastReceivedTime = 0;
-const unsigned long TIMEOUT = 5000; // 5秒未收到判为断联
-
+unsigned long lastReceive = 0;
+const unsigned long TIMEOUT = 3000; // 超过3秒无数据就认为断联
 bool isConnected = false;
+
+struct ControlPacket {
+  int16_t throttle;  // 前进后退（-512~512）
+  int16_t steering;  // 左右控制（-512~512）
+  uint8_t flags;     // 扩展功能位，例如灯光、音效等
+};
 
 void setup() {
   Serial.begin(115200);
   SPI.begin(18, 19, 23);
 
   if (!radio.begin()) {
-    Serial.println("❌ NRF24 初始化失败，检查接线或电源！");
+    Serial.println("NRF24 初始化失败");
     while (1);
   }
 
   radio.setPALevel(RF24_PA_LOW);
   radio.setDataRate(RF24_1MBPS);
-  radio.setChannel(76);
+  radio.setChannel(90);
   radio.openReadingPipe(1, rxAddr);
   radio.openWritingPipe(txAddr);
   radio.startListening();
 
-  Serial.println("📡 接收端启动完成，等待数据...");
-  lastReceivedTime = millis();
+  Serial.println("🚗 接收端启动完成，等待指令...");
 }
 
 void loop() {
   if (radio.available()) {
-    char data[32] = "";
-    radio.read(&data, sizeof(data));
+    ControlPacket packet;
+    radio.read(&packet, sizeof(packet));
 
-    Serial.print("📥 收到数据：");
-    Serial.println(data);
-
-    lastReceivedTime = millis();
-
-    // 连接状态首次建立时提示
+    lastReceive = millis();
     if (!isConnected) {
-      Serial.println("✅ 已建立通信连接！");
+      Serial.println("✅ 控制信号已连接！");
       isConnected = true;
     }
 
-    // 自动回应 handshake
-    if (strcmp(data, "PING") == 0) {
-      radio.stopListening();
-      const char pong[] = "PONG";
-      bool ok = radio.write(&pong, sizeof(pong));
-      Serial.println(ok ? "🔁 回应 PONG 成功" : "⚠️ 回应失败！");
-      radio.startListening();
-    }
+    // 显示指令内容
+    Serial.print("🚀 油门: ");
+    Serial.print(packet.throttle);
+    Serial.print(" | 转向: ");
+    Serial.print(packet.steering);
+    Serial.print(" | 标志位: ");
+    Serial.println(packet.flags);
+
+    // 可以在这里用 packet.throttle / steering 去控制电机
+
+    // 回复确认
+    radio.stopListening();
+    const char ack[] = "ACK";
+    radio.write(&ack, sizeof(ack));
+    radio.startListening();
   }
 
-  // 检测是否断联
-  if (millis() - lastReceivedTime > TIMEOUT && isConnected) {
-    Serial.println("⛔ 对方已断开或掉电！");
+  // 如果超时未收到
+  if (millis() - lastReceive > TIMEOUT && isConnected) {
+    Serial.println("❌ 控制信号丢失！");
     isConnected = false;
+    // 可以在这里紧急停止电机
   }
 }
