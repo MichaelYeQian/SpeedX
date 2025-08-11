@@ -98,126 +98,159 @@
 // }
 
 
+//--------------------------------------------------------------------------
+//--------------------------------------------------------------------------
+//--------------------------------------------------------------------------
 
 
 
-// === Snowcat_ESC_Test.ino ===
-// 硬件: ESP32 + 航模ESC + 2212电机，信号脚接 GPIO25
-// 供电: 电池 -> ESC，BEC(5V) 或 独立降压给 ESP32；务必共地(GND)
+
+
+// === Snowcat_ESC_SerialControl.ino ===
+// 硬件: ESP32 + 航模ESC + 2212电机，ESC信号脚→GPIO25
+// 供电: 电池->ESC；ESP32 由 BEC(5V) 或独立降压供电；务必共地(GND)
 
 #include <Arduino.h>
 
-// ---------- 可调参数 ----------
-const int   ESC_PIN   = 25;   // 你的 ESC 信号脚
-const int   PWM_CH    = 0;    // LEDC 通道 0~15 任意
-const int   PWM_FREQ  = 50;   // 50Hz (舵机/ESC标准)
-const int   PWM_RES   = 16;   // 16位分辨率(0..65535)
-const int   PULSE_MIN = 1000; // µs
-const int   PULSE_MAX = 2000; // µs
-const int   PULSE_IDLE= 1000; // 解锁/最小油门
-const int   PULSE_SLOW= 1250; // 慢速运行 (1200~1300 更慢/更快)
-const bool  DO_THROTTLE_CALIBRATION = false; // 若首次使用且ESC需要校准, 设 true
+// ---------- 基本参数 ----------
+const int   ESC_PIN   = 25;
+const int   PWM_CH    = 0;
+const int   PWM_FREQ  = 50;   // 50Hz
+const int   PWM_RES   = 16;   // 16-bit
+const int   US_MIN    = 1000; // µs
+const int   US_MAX    = 2000; // µs
+const int   US_IDLE   = 1000; // 解锁/最小
+const int   US_SLOW   = 1250; // 默认慢速
 
-// 软启动设置
-const int   RAMP_STEP_US = 2;    // 每步增加的微秒
-const int   RAMP_DELAY_MS= 8;    // 每步延时
+// 软启动
+const int   RAMP_STEP_US = 2;
+const int   RAMP_DELAY_MS= 8;
 
-// ---------- 工具函数 ----------
-uint32_t pulseUsToDuty(int us) {
-  // 50Hz -> 周期 20000us；16位满量程 65535
-  // 常见ESC: 1000~2000us 对应约 5%~10%占空比
-  // 直接线性映射到 [3277, 6553] 区间
-  long duty = map(us, 1000, 2000, 3277, 6553);
-  if (duty < 0) duty = 0;
-  if (duty > 65535) duty = 65535;
+int currentUs = US_IDLE;
+
+// ---------- 工具 ----------
+uint32_t usToDuty(int us){
+  long duty = map(us, 1000, 2000, 3277, 6553); // 5%~10%
+  duty = constrain(duty, 0, 65535);
   return (uint32_t)duty;
 }
-
-void escWriteUs(int us) {
-  us = constrain(us, PULSE_MIN, PULSE_MAX);
-  ledcWrite(PWM_CH, pulseUsToDuty(us));
+void escWriteUs(int us){
+  currentUs = constrain(us, US_MIN, US_MAX);
+  ledcWrite(PWM_CH, usToDuty(currentUs));
 }
-
-void escArm() {
-  // 最小油门解锁
-  escWriteUs(PULSE_IDLE);
-  delay(2000); // 多数航模ESC 需保持一段时间
+void escArm(){
+  escWriteUs(US_IDLE);
+  delay(2000);
 }
-
-void escRampTo(int targetUs) {
-  // 从当前占空比缓慢拉到目标占空比
-  // 先估计当前 duty 对应的 us（简单做法：不追踪，直接从 PULSE_IDLE 开始拉）
-  int current = PULSE_IDLE;
-  escWriteUs(current);
-  delay(50);
-  if (targetUs < current) {
-    for (int us = current; us >= targetUs; us -= RAMP_STEP_US) {
-      escWriteUs(us);
-      delay(RAMP_DELAY_MS);
-    }
-  } else {
-    for (int us = current; us <= targetUs; us += RAMP_STEP_US) {
-      escWriteUs(us);
-      delay(RAMP_DELAY_MS);
-    }
+void escRampTo(int targetUs){
+  targetUs = constrain(targetUs, US_MIN, US_MAX);
+  int step = (targetUs >= currentUs) ? RAMP_STEP_US : -RAMP_STEP_US;
+  for(int us = currentUs; (step>0)? us<=targetUs : us>=targetUs; us += step){
+    escWriteUs(us);
+    delay(RAMP_DELAY_MS);
   }
   escWriteUs(targetUs);
 }
-
-// ---------- 可选：油门校准流程 ----------
-void throttleCalibration() {
-  // 一些航模ESC需要：
-  // 1) 上电后立刻给最大油门(2000us)几秒
-  // 2) 再给最小油门(1000us)几秒
-  // 校准步骤以你的 ESC 说明书为准！
-  Serial.println(F("[校准] 输出最大油门..."));
-  escWriteUs(PULSE_MAX);
-  delay(3000);
-
-  Serial.println(F("[校准] 切换最小油门..."));
-  escWriteUs(PULSE_MIN);
-  delay(3000);
-
-  Serial.println(F("[校准] 完成。"));
+void printHelp(){
+  Serial.println(F("\n命令："));
+  Serial.println(F("  p <0-100>     设定百分比油门，如: p 30"));
+  Serial.println(F("  u <1000-2000> 设定脉宽(µs)，如: u 1300"));
+  Serial.println(F("  r <µs>        软启动到目标脉宽，如: r 1400"));
+  Serial.println(F("  s             急停(最小油门)"));
+  Serial.println(F("  g             慢速运行(1250µs)"));
+  Serial.println(F("  h             帮助\n"));
+  Serial.print(F("当前输出: ")); Serial.print(currentUs); Serial.println(F(" us"));
 }
 
-// ---------- 主流程 ----------
-void setup() {
+// 解析一行命令
+void handleLine(String line){
+  line.trim();
+  if(line.length() == 0) return;
+  // 拆分
+  int sp = line.indexOf(' ');
+  String cmd = (sp<0)? line : line.substring(0, sp);
+  String arg = (sp<0)? ""   : line.substring(sp+1);
+  cmd.toLowerCase(); arg.trim();
+
+  if(cmd == "p"){                       // 百分比
+    int pct = arg.toInt();
+    pct = constrain(pct, 0, 100);
+    int us = US_MIN + (int)(pct * 10);  // 0..100 -> 1000..2000
+    escWriteUs(us);
+    Serial.print(F("[OK] 油门 ")); Serial.print(pct); Serial.print(F("%) -> "));
+    Serial.print(us); Serial.println(F(" us"));
+  } else if(cmd == "u"){                // 微秒
+    int us = arg.toInt();
+    us = constrain(us, US_MIN, US_MAX);
+    escWriteUs(us);
+    Serial.print(F("[OK] 设定 ")); Serial.print(us); Serial.println(F(" us"));
+  } else if(cmd == "r"){                // 软启动
+    int us = arg.toInt();
+    us = constrain(us, US_MIN, US_MAX);
+    Serial.print(F("[RAMP] ")); Serial.print(currentUs); Serial.print(F(" -> "));
+    Serial.print(us); Serial.println(F(" us"));
+    escRampTo(us);
+  } else if(cmd == "s"){                // 急停
+    escWriteUs(US_IDLE);
+    Serial.println(F("[STOP] 最小油门(1000us)"));
+  } else if(cmd == "g"){                // 慢速
+    escRampTo(US_SLOW);
+    Serial.println(F("[GO] 慢速运行(1250us)"));
+  } else if(cmd == "h" || cmd == "help" || cmd == "?"){
+    printHelp();
+  } else {
+    Serial.println(F("[ERR] 未知命令。输入 h 查看帮助。"));
+  }
+}
+
+void setup(){
   Serial.begin(115200);
   delay(200);
 
-  // 初始化 LEDC PWM
   ledcSetup(PWM_CH, PWM_FREQ, PWM_RES);
   ledcAttachPin(ESC_PIN, PWM_CH);
 
-  Serial.println(F("ESC 测试程序启动"));
-  Serial.println(F("请确保: 电池->ESC 接好, 电机连接正确, GND 共地."));
-  Serial.println(F("串口输入 's' 可急停。"));
-
-  if (DO_THROTTLE_CALIBRATION) {
-    Serial.println(F("进入油门校准模式..."));
-    throttleCalibration();
-  }
-
-  Serial.println(F("ESC 解锁..."));
+  Serial.println(F("ESC 串口调速程序启动"));
+  Serial.println(F("注意: 电池->ESC，ESP32 与 ESC 必须共地(GND)。"));
+  Serial.println(F("先解锁 ESC..."));
   escArm();
 
   Serial.println(F("软启动到慢速..."));
-  escRampTo(PULSE_SLOW);
-
-  Serial.println(F("正在慢速运行。"));
+  escRampTo(US_SLOW);
+  printHelp();
 }
 
-void loop() {
-  // 保持慢速运行；监听串口急停
-  if (Serial.available()) {
-    char c = Serial.read();
-    if (c == 's' || c == 'S') {
-      Serial.println(F("急停: 输出最小油门"));
-      escWriteUs(PULSE_IDLE);
-      while (1) { delay(100); } // 停在这里，防止误触再次加油门
+void loop(){
+  // 串口行读取
+  static String buf;
+  while(Serial.available()){
+    char c = (char)Serial.read();
+    if(c == '\r') continue;
+    if(c == '\n'){
+      handleLine(buf);
+      buf = "";
+    } else {
+      buf += c;
+      if(buf.length() > 64) buf = ""; // 防溢出
     }
   }
-  delay(20);
+  delay(10);
 }
 
+//用法小结：
+
+// 打开串口监视器（115200，无自动换行或设“Both NL & CR”均可），输入：
+
+// p 30 → 30% 油门（约 1300 µs）
+
+// u 1200 → 1200 µs
+
+// r 1400 → 软启动到 1400 µs
+
+// s → 急停（1000 µs）
+
+// g → 慢速（1250 µs）
+
+// h → 帮助
+
+// 想更慢/更快，改 US_SLOW 或直接用命令调。
